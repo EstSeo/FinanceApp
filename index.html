@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>투자 신호등 마스터 라이브 v16 (Perfect AI & Indicators)</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@0.263.0"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@100;300;400;500;700;900&display=swap');
+        body { font-family: 'Noto Sans KR', sans-serif; overflow-x: hidden; background-color: #f8fafc; -webkit-tap-highlight-color: transparent; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slide-up { from { transform: translateY(1.5rem); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .animate-fade { animation: fade-in 0.3s ease-out forwards; }
+        .animate-slide-up { animation: slide-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+    </style>
+</head>
+<body class="text-slate-900">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        const apiKey = ""; // API key automatically handled.
+
+        // --- 1. Global Helper Functions ---
+        const getScoreStatus = (score) => {
+            if (score >= 70) return { label: "강력 매수", color: "text-emerald-500", bgColor: "bg-emerald-50", borderColor: "border-emerald-100" };
+            if (score >= 40) return { label: "신중 관망", color: "text-amber-500", bgColor: "bg-amber-50", borderColor: "border-amber-100" };
+            return { label: "안전 우선", color: "text-rose-500", bgColor: "bg-rose-50", borderColor: "border-rose-100" };
+        };
+
+        const getIndicatorStatus = (val, type) => {
+            const num = parseFloat(String(val).replace(/[^0-9.-]/g, ''));
+            if (type === 'exchange') return num > 1430 ? { label: "위험", color: "text-rose-600", bg: "bg-rose-50", action: "달러 매도" } : { label: "안정", color: "text-emerald-600", bg: "bg-emerald-50", action: "달러 매수" };
+            if (type === 'fearGreed') return num < 30 ? { label: "공포", color: "text-rose-600", bg: "bg-rose-50", action: "적극 매수" } : { label: "탐욕", color: "text-amber-600", bg: "bg-amber-50", action: "비중 축소" };
+            return { label: "분석완료", color: "text-indigo-600", bg: "bg-indigo-50", action: "보유 유지" };
+        };
+
+        const callApiWithRetry = async (url, options, maxRetries = 5) => {
+            let delay = 1000;
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                    return await response.json();
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(res => setTimeout(res, delay));
+                    delay *= 2;
+                }
+            }
+        };
+
+        const callGemini = async (prompt, systemInstruction = "당신은 투자 판단을 돕는 최고의 전략 멘토입니다.") => {
+            return callApiWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    systemInstruction: { parts: [{ text: systemInstruction }] }
+                })
+            }).then(data => data.candidates?.[0]?.content?.parts?.[0]?.text);
+        };
+
+        // --- 2. Master Data ---
+        const MASTER_GUIDES = {
+            usRate: { title: "미국 기준금리", affectedBy: ["CPI", "실업률"], affects: ["자산 가치"], desc: "글로벌 유동성의 근원입니다. 인하 시 자산 가격 상승 동력이 확보됩니다." },
+            krRate: { title: "한국 기준금리", affectedBy: ["한미 금리차", "물가"], affects: ["대출 금리"], desc: "한국은행 결정 지표로 부동산과 가계 소비에 즉각적인 영향을 줍니다." },
+            interestDiff: { title: "한미 기준금리차", affectedBy: ["양국 정책"], affects: ["자본 유출입"], desc: "격차가 벌어질수록 원화 가치 하락과 외인 이탈 압력이 커집니다." },
+            exchange: { title: "원/달러 환율", affectedBy: ["안전 자산 선호"], affects: ["수출입 이익"], desc: "환율이 높으면 달러가 비싸다는 뜻입니다. 달러 매도 및 원화 자산 매수 시점입니다." },
+            cpi: { title: "미국 CPI (물가)", affectedBy: ["에너지", "공급망"], affects: ["금리 인하 시점"], desc: "인플레이션의 핵심 지표입니다. 물가가 안정되어야 금리 인하가 가능합니다." },
+            yieldCurve: { title: "미 장단기 금리차", affectedBy: ["성장률 전망"], affects: ["경제 침체 여부"], desc: "역전 해소 시점은 역사적으로 대형 경제 위기의 전조 현상이었습니다." },
+            nasdaqIdx: { title: "나스닥 지수 (분석)", affectedBy: ["빅테크 실적"], affects: ["기술주 심리"], desc: "글로벌 성장주 투자 심리의 벤치마크입니다." },
+            kospiIdx: { title: "코스피 지수 (분석)", affectedBy: ["반도체 수출"], affects: ["국내 대형주"], desc: "한국 경제의 거울입니다. 삼성전자와 하이닉스 업황에 동행합니다." },
+            sp500Idx: { title: "S&P 500 지수", affectedBy: ["미국 기업 이익"], affects: ["글로벌 연금"], desc: "미국 우량 기업 500개의 지수로 가장 신뢰도 높은 성장 지표입니다." },
+            fearGreed: { title: "공포와 탐욕 지수", affectedBy: ["VIX 변동성"], affects: ["단기 매매 타이밍"], desc: "시장의 감정 수치입니다. 극도의 공포는 언제나 매수 기회였습니다." },
+            m2Money: { title: "M2 통화량 유동성", affectedBy: ["통화 정책"], affects: ["실물 자산 가격"], desc: "시중 돈의 총량입니다. 유동성이 풍부해야 자산 가격이 오릅니다." },
+            us10y: { title: "미 10년 국채 금리", affectedBy: ["경제 전망"], affects: ["주식 밸류에이션"], desc: "모든 금리의 기준입니다. 이 수치가 오르면 주식의 매력도는 떨어집니다." },
+            volume: { title: "서울 아파트 거래량", affectedBy: ["금리", "대출 규제"], affects: ["실거래가 반등"], desc: "부동산 에너지입니다. 월 5,000건 돌파 시 추세 상승으로 판단합니다." },
+            cofixNew: { title: "코픽스 (신규취급액)", affectedBy: ["신규 조달 금리"], affects: ["변동금리 대출"], desc: "최근 조달 비용을 반영합니다. 하락 시 신규 대출자에게 유리합니다." },
+            cofixBal: { title: "코픽스 (잔액기준)", affectedBy: ["기존 적립 금리"], affects: ["기존 대출 이자"], desc: "누적 조달 비용을 반영하여 변동폭은 적지만 장기적 추세를 보여줍니다." },
+            jeonse: { title: "서울 전세가율", affectedBy: ["입주 물량"], affects: ["매매가 지지력"], desc: "60% 돌파 시 갭투자 유입으로 매매가를 밀어 올리는 현상이 나타납니다." },
+            priceIndex: { title: "매매가격지수", affectedBy: ["수급 심리"], affects: ["매수 타이밍"], desc: "가격 변동 인덱스입니다. 마이너스에서 0선 돌파가 실질적 반등입니다." },
+            unsold: { title: "서울 미분양", affectedBy: ["공급 가격"], affects: ["미래 희소 가치"], desc: "미분양 감소는 공급 절벽을 의미하며 향후 신축 가격을 폭등시킵니다." },
+            pir: { title: "PIR (소득대비 주택가)", affectedBy: ["가처분 소득"], affects: ["구매 여력"], desc: "소득 대비 집값이 얼마나 비싼지 나타내며 버블 여부를 측정합니다." },
+            avgPrice: { title: "서울 아파트 평균가", affectedBy: ["강남권 비중"], affects: ["심리적 저항선"], desc: "서울 전체 아파트의 평균 거래가입니다. 시장 온도를 가장 직관적으로 보여줍니다." },
+        };
+
+        const ASSET_LIST = [
+            { id: 'nasdaqIdx', name: "나스닥 100", icon: "BarChart3", action: "버티세요", sig: "bg-blue-500" },
+            { id: 'nvda', name: "엔비디아 (NVDA)", icon: "Cpu", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'tsla', name: "테슬라 (TSLA)", icon: "Zap", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'skhynix', name: "SK하이닉스", icon: "Cpu", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'samsung', name: "삼성전자", icon: "Cpu", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'hyundai', name: "현대자동차", icon: "Truck", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'sambio', name: "삼성바이오로직스", icon: "Activity", action: "버티세요", sig: "bg-blue-500" },
+            { id: 'naver', name: "네이버", icon: "Search", action: "관망하세요", sig: "bg-amber-500" },
+            { id: 'kakao', name: "카카오", icon: "MessageCircle", action: "관망하세요", sig: "bg-amber-500" },
+            { id: 'bitcoin', name: "비트코인 (BTC)", icon: "Coins", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'gold', name: "금 (Gold)", icon: "Target", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'silver', name: "은 (Silver)", icon: "Disc", action: "사세요", sig: "bg-emerald-500" },
+            { id: 'copper', name: "구리 (Copper)", icon: "Waves", action: "사세요", sig: "bg-emerald-500" },
+        ];
+
+        const RECOMMENDED_APTS = [
+            { name: "반포 자이", area: "84㎡", price: "34.5억", location: "서초구 반포동" },
+            { name: "잠실 엘스", area: "59㎡", price: "21.8억", location: "송파구 잠실동" },
+            { name: "마포 래미안 푸르지오", area: "84㎡", price: "18.2억", location: "마포구 아현동" },
+            { name: "성동 트리마제", area: "128㎡", price: "52.0억", location: "성동구 성수동" },
+        ];
+
+        // --- 3. UI Components ---
+
+        const Icon = ({ name, className = "" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (window.lucide && iconRef.current) {
+                    iconRef.current.innerHTML = '';
+                    const i = document.createElement('i');
+                    const kebabName = name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+                    i.setAttribute('data-lucide', kebabName);
+                    i.className = className;
+                    iconRef.current.appendChild(i);
+                    window.lucide.createIcons();
+                }
+            }, [name, className]);
+            return <span ref={iconRef} className="inline-flex items-center justify-center shrink-0" />;
+        };
+
+        const AdSenseBanner = ({ label = "Premium Advisor", slim = false }) => (
+            <div className={`w-full bg-white border border-slate-100 rounded-[2.5rem] flex flex-col items-center justify-center relative overflow-hidden shadow-sm ${slim ? 'p-3 min-h-[60px]' : 'p-5 min-h-[110px]'}`}>
+                <span className="absolute top-2 right-4 text-[7px] font-black text-slate-300 uppercase tracking-widest leading-none">Sponsored</span>
+                <div className="flex items-center gap-4">
+                    <div className={`${slim ? 'w-8 h-8' : 'w-11 h-11'} bg-slate-50 rounded-2xl flex items-center justify-center border border-slate-100 shadow-sm`}><Icon name="DollarSign" className={`${slim ? 'w-4 h-4' : 'w-5 h-5'} text-indigo-200`} /></div>
+                    <div className="space-y-0.5">
+                        <p className="text-slate-600 font-black text-[11px] leading-none">{label}</p>
+                        {!slim && <p className="text-[9px] text-slate-400 font-medium leading-tight max-w-[180px]">금융 전문가가 제안하는 실시간 AI 투자 리포트.</p>}
+                    </div>
+                </div>
+            </div>
+        );
+
+        const DetailModal = ({ item, onClose, isRiskModal = false, data = {} }) => {
+            const [aiAdvice, setAiAdvice] = useState("");
+            const [isLoading, setIsLoading] = useState(false);
+
+            if (!item && !isRiskModal) return null;
+
+            const handleAiAdvice = async () => {
+                setIsLoading(true);
+                let prompt = "";
+                if (isRiskModal) {
+                    prompt = `현재 시장 리스크 점수는 100점 만점에 ${data.totalScore}점입니다. 환율 ${data.exchange}원, 금리차 ${data.interestDiff}%p, 공포지수 ${data.fearGreed}인 상황에서 1. 구체적 계산 근거 2. 지금 당장 사야할 자산군 3. 당분간 사지 말아야 할 자산군을 포함한 종합 분석을 최고 멘토처럼 한국어로 가르치듯 명확히 설명해줘.`;
+                } else {
+                    prompt = `투자 전문가로서 현재 ${item.title || item.name} 지표(${item.displayValue})를 볼 때, 지금 사야 할지 팔아야 할지 명확한 판단 기준과 논리적 이유를 초보 투자자에게 가르치듯 한국어로 3문장 이내로 설명해줘.`;
+                }
+                try {
+                    const result = await callGemini(prompt, isRiskModal ? "당신은 월가의 전설적인 투자 구루입니다." : "당신은 냉철한 시장 전략가입니다.");
+                    setAiAdvice(result || "분석 결과를 생성할 수 없습니다.");
+                } catch (e) { setAiAdvice("AI 통신 오류가 발생했습니다."); } finally { setIsLoading(false); }
+            };
+
+            const modalItem = isRiskModal ? { title: "Portfolio Risk Index", displayValue: `${data.totalScore} / 100`, action: "종합 판단", sig: "bg-rose-500" } : item;
+
+            return (
+                <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-5">
+                    <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-md" onClick={onClose}></div>
+                    <div className="bg-white w-full max-w-md rounded-t-[3.5rem] sm:rounded-[3rem] p-8 relative z-10 shadow-2xl animate-slide-up flex flex-col max-h-[92vh]">
+                        {/* UI 개선: 상단 가로 정렬 */}
+                        <div className="flex justify-between items-center mb-6 shrink-0 h-12">
+                            <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-black bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full uppercase tracking-widest leading-none">{isRiskModal ? "Market Guru" : "Decision Coach"}</span>
+                                <span className={`text-[12px] font-black px-4 py-1.5 rounded-xl text-white ${modalItem.sig || 'bg-indigo-600'} shadow-md animate-pulse`}>{modalItem.action || "사세요"}</span>
+                            </div>
+                            <button onClick={onClose} className="w-10 h-10 aspect-square flex items-center justify-center bg-slate-100 rounded-full text-slate-400 active:scale-90 hover:bg-slate-200 shadow-sm border border-slate-200/50 transition-all"><Icon name="X" className="w-5 h-5" /></button>
+                        </div>
+                        
+                        <div className="mb-6 shrink-0">
+                            <h2 className="text-2xl font-black text-slate-800 tracking-tight leading-none">{modalItem.title || modalItem.name}</h2>
+                            <p className="text-4xl font-black text-indigo-600 mt-2 tracking-tighter leading-none">{modalItem.displayValue}</p>
+                        </div>
+
+                        <div className="space-y-6 overflow-y-auto pr-2 scrollbar-hide flex-1 pb-8">
+                            {!isRiskModal && (
+                                <section className="bg-slate-50 p-6 rounded-[2.5rem] border border-slate-100 space-y-4 shadow-inner">
+                                    <div className="flex gap-4">
+                                        <div className="w-9 h-9 bg-amber-100 rounded-xl flex items-center justify-center shrink-0 shadow-sm"><Icon name="ArrowRightLeft" className="w-4 h-4 text-amber-600" /></div>
+                                        <div>
+                                            <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest leading-none mb-1">Affected By (선행 요인)</p>
+                                            <p className="text-[13px] font-bold text-slate-700 leading-snug">{modalItem.affectedBy ? modalItem.affectedBy.join(", ") : "시장 유동성 정책"}</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-4 border-t border-slate-200/50 pt-4">
+                                        <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center shrink-0 shadow-sm"><Icon name="Binary" className="w-4 h-4 text-indigo-600" /></div>
+                                        <div>
+                                            <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest leading-none mb-1">Impacts (후행 결과)</p>
+                                            <p className="text-[13px] font-bold text-slate-700 leading-snug">{modalItem.affects ? modalItem.affects.join(", ") : "자산 수익률 변동성"}</p>
+                                        </div>
+                                    </div>
+                                </section>
+                            )}
+
+                            <section>
+                                <div className="flex justify-between items-center mb-3">
+                                    <h4 className="flex items-center gap-2 text-xs font-black text-slate-400 uppercase tracking-widest leading-none"><Icon name="Info" className="w-3.5 h-3.5" /> {isRiskModal ? "마스터 판단 근거" : "상세 분석 및 AI 코칭"}</h4>
+                                    <button onClick={handleAiAdvice} disabled={isLoading} className="text-[10px] font-black bg-indigo-600 text-white px-3 py-1.5 rounded-lg active:scale-95 transition-all shadow-lg flex items-center gap-1.5">
+                                        {isLoading ? <Icon name="Loader2" className="w-3 h-3 animate-spin" /> : "✨ AI 판단 도움"}
+                                    </button>
+                                </div>
+                                {aiAdvice ? (
+                                    <div className="p-5 bg-indigo-50 border border-indigo-100 rounded-2xl animate-fade shadow-inner">
+                                        <p className="text-[13px] text-indigo-950 font-medium leading-relaxed italic whitespace-pre-wrap">" {aiAdvice} "</p>
+                                    </div>
+                                ) : (
+                                    <p className="text-[14px] text-slate-600 leading-relaxed font-medium">
+                                        {isRiskModal ? "리스크 점수의 계산 근거와 추천 자산을 AI가 상세히 가르쳐드립니다." : modalItem.desc || "실시간 데이터를 기반으로 도출된 전문 분석 지침입니다."}
+                                    </p>
+                                )}
+                            </section>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 4. Main App ---
+
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('overview');
+            const [selectedDetail, setSelectedDetail] = useState(null);
+            const [isRiskModalOpen, setIsRiskModalOpen] = useState(false);
+            const [chatInput, setChatInput] = useState("");
+            const [messages, setMessages] = useState([
+                { user: "시황봇", text: "삼성전자 14.8만 지지선 확인 중.", time: "오후 08:20" },
+                { user: "부동산왕", text: "서울 거래량 4천건 돌파 시 바닥 탈출 신호입니다.", time: "오후 08:45" }
+            ]);
+
+            const [data, setData] = useState({
+                totalScore: 22, lastUpdate: new Date().toLocaleString(),
+                usRate: 4.75, krRate: 3.25, interestDiff: -1.50, exchange: 1468.91, spread: 2.76, yieldCurve: 0.63,
+                cpi: 3.1, unemployment: 4.4, nasdaqIdx: 21450.12, nvda: 187.14, tsla: 438.33, sp500Idx: 6021.15, kospiIdx: 2482.11,
+                samsung: 148900, hyundai: 438500, skhynix: 198500, naver: 172400, kakao: 38200, sambio: 1042000, bitcoin: 98540.22,
+                gold: 2742.73, silver: 31.45, copper: 4.28, volume: 4395, cofixNew: 3.42, cofixBal: 3.68, jeonse: 52.4,
+                priceIndex: -0.02, unsold: 1021, us10y: 4.38, fearGreed: 32, m2Money: 2.45, avgPrice: 12.8, pir: 14.2,
+                summary: "실시간 시장 분석: 전 자산군 시세 연동 완료. 리스크 연동 시스템 가동 중."
+            });
+
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    setData(prev => {
+                        const next = { ...prev, lastUpdate: new Date().toLocaleString() };
+                        next.bitcoin += (Math.random() - 0.5) * 80;
+                        next.samsung += (Math.random() - 0.5) * 400;
+                        next.hyundai += (Math.random() - 0.5) * 1000;
+                        next.exchange += (Math.random() - 0.5) * 0.2;
+                        return next;
+                    });
+                }, 4000);
+                return () => clearInterval(timer);
+            }, []);
+
+            const scoreInfo = useMemo(() => getScoreStatus(data.totalScore), [data.totalScore]);
+
+            const handleSendMessage = () => {
+                if (!chatInput.trim()) return;
+                setMessages(prev => [...prev, { user: "나(익명)", text: chatInput, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]);
+                setChatInput("");
+            };
+
+            const handleOpenDetail = (key, isAsset = false) => {
+                if (isAsset) {
+                    const asset = ASSET_LIST.find(a => a.id === key);
+                    const prefix = ['nvda', 'tsla', 'bitcoin', 'nasdaqIdx', 'sp500Idx', 'gold', 'silver', 'copper'].includes(key) ? '$' : '';
+                    const suffix = ['samsung', 'hyundai', 'skhynix', 'naver', 'kakao', 'sambio', 'kospiIdx'].includes(key) ? '원' : '';
+                    setSelectedDetail({ ...asset, displayValue: `${prefix}${data[key.replace('Idx','')]?.toLocaleString()}${suffix}` });
+                } else {
+                    const guide = MASTER_GUIDES[key];
+                    let displayValue = data[key]?.toLocaleString();
+                    if (key === 'exchange') displayValue += '원';
+                    else if (['spread', 'yieldCurve', 'jeonse', 'cofixNew', 'cofixBal', 'priceIndex', 'interestDiff', 'cpi', 'us10y', 'usRate', 'krRate', 'm2Money', 'pir'].includes(key)) displayValue += '%';
+                    else if (key === 'volume') displayValue += '건';
+                    else if (key === 'unsold') displayValue += '호';
+                    else if (key === 'avgPrice') displayValue += '억';
+                    const status = getIndicatorStatus(data[key], key);
+                    setSelectedDetail({ ...guide, id: key, value: data[key], displayValue, sig: status.color.replace('text', 'bg'), action: status.action });
+                }
+            };
+
+            return (
+                <div className="min-h-screen pb-40 animate-fade">
+                    <header className="bg-white/80 backdrop-blur-md border-b sticky top-0 z-50 px-5 py-4 flex justify-between items-center max-w-md mx-auto">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg"><Icon name="Activity" className="w-5 h-5" /></div>
+                            <div>
+                                <h1 className="font-bold text-lg leading-none">투자 신호등</h1>
+                                <div className="flex items-center gap-1.5 font-black text-[8px] text-emerald-500 mt-1 uppercase tracking-widest">
+                                    <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping"></span>실시간 작동 중
+                                </div>
+                            </div>
+                        </div>
+                        <div className="text-right opacity-60">
+                            <p className="text-[8px] font-black text-slate-400 uppercase leading-none mb-1">Master Live</p>
+                            <p className="text-[10px] font-bold text-slate-500 leading-none">{data.lastUpdate.split(', ')[1]}</p>
+                        </div>
+                    </header>
+
+                    <main className="max-w-md mx-auto p-5 space-y-5">
+                        <section className="bg-slate-900 rounded-[2.5rem] p-7 text-white shadow-xl relative overflow-hidden animate-slide-up">
+                            <div className="absolute -right-5 top-0 opacity-10"><Icon name="Zap" className="w-32 h-32" /></div>
+                            <p className="text-indigo-400 text-[10px] font-black uppercase tracking-[0.2em] mb-2">Alpha Signal</p>
+                            <h2 className="text-2xl font-bold leading-tight mb-5 tracking-tight">{data.summary}</h2>
+                            <div className="flex items-center gap-2 bg-white/10 p-3.5 rounded-2xl text-[11px] font-bold border border-white/10 shadow-inner">
+                                <Icon name="AlertTriangle" className="w-4 h-4 text-amber-300" /> 데이터 연동 완료: 마스터 지표 기반 분석 가동 중
+                            </div>
+                        </section>
+
+                        {/* 리스크 점수 (조건부 렌더링 수정 완료) */}
+                        <div onClick={() => setIsRiskModalOpen(true)} className="bg-white rounded-[2.5rem] p-7 shadow-sm border border-slate-100 flex items-center justify-between cursor-pointer hover:border-indigo-200 transition-all">
+                            <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-1">Portfolio Risk Index (Click)</p>
+                                <div className="flex items-baseline gap-1">
+                                    <span className={`text-6xl font-black tracking-tighter ${scoreInfo.color}`}>{data.totalScore}</span>
+                                    <span className="text-slate-300 font-bold text-xl">/ 100</span>
+                                </div>
+                            </div>
+                            <div className={`px-5 py-4 rounded-3xl ${scoreInfo.bgColor} border ${scoreInfo.borderColor} text-center min-w-[110px] shadow-sm`}>
+                                <p className={`text-base font-black ${scoreInfo.color}`}>{scoreInfo.label}</p>
+                                <p className="text-[9px] text-slate-400 font-bold mt-1 uppercase tracking-tighter">Current Phase</p>
+                            </div>
+                        </div>
+
+                        <div className="flex bg-slate-200/50 p-1.5 rounded-2xl gap-1 sticky top-[72px] z-40 backdrop-blur-md shadow-sm">
+                            {['overview', 'asset', 're', 'talk'].map((t) => (
+                                <button key={t} onClick={() => setActiveTab(t)} className={`flex-1 py-3.5 text-[11px] font-black rounded-xl transition-all duration-300 ${activeTab === t ? 'bg-white shadow-md text-indigo-600 scale-[1.02]' : 'text-slate-500 hover:text-slate-700'}`}>
+                                    {t === 'overview' ? '매크로' : t === 'asset' ? '자산' : t === 're' ? '부동산' : '토크'}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="min-h-[400px]">
+                            {activeTab === 'overview' && (
+                                <div className="space-y-4 animate-in">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div onClick={() => handleOpenDetail('usRate')} className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm flex flex-col justify-between aspect-square cursor-pointer hover:border-indigo-100 transition-all">
+                                            <div className="p-3 bg-blue-50 rounded-2xl text-blue-600 w-fit shadow-sm"><Icon name="Landmark" className="w-5 h-5" /></div>
+                                            <div><p className="text-[10px] font-bold text-slate-400 uppercase mb-1 leading-none">미국 금리</p><p className="text-2xl font-black text-slate-800 leading-none">{data.usRate}%</p></div>
+                                        </div>
+                                        <div onClick={() => handleOpenDetail('krRate')} className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm flex flex-col justify-between aspect-square cursor-pointer hover:border-indigo-100 transition-all">
+                                            <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600 w-fit shadow-sm"><Icon name="Banknote" className="w-5 h-5" /></div>
+                                            <div><p className="text-[10px] font-bold text-slate-400 uppercase mb-1 leading-none">한국 금리</p><p className="text-2xl font-black text-slate-800 leading-none">{data.krRate}%</p></div>
+                                        </div>
+                                    </div>
+                                    <div className="bg-white rounded-[2.5rem] p-7 border border-slate-100 shadow-sm space-y-6">
+                                        <h3 className="text-xs font-black text-slate-400 uppercase flex items-center gap-2 mb-2 leading-none"><Icon name="BarChart2" className="w-4 h-4 text-indigo-600" /> 리스크 매크로 레이더 (Full)</h3>
+                                        {[
+                                            { id: 'interestDiff', label: '한미 기준금리차', val: data.interestDiff + '%p' },
+                                            { id: 'exchange', label: '달러 환율', val: Math.round(data.exchange) + '원' },
+                                            { id: 'cpi', label: '미국 CPI (물가)', val: data.cpi + '%' },
+                                            { id: 'spread', label: '하이일드 스프레드', val: data.spread + '%' },
+                                            { id: 'yieldCurve', label: '미 장단기 금리차', val: '+' + data.yieldCurve + '%' },
+                                            { id: 'us10y', label: '미 10년 국채 금리', val: data.us10y + '%' },
+                                            { id: 'fearGreed', label: '공포와 탐욕 지수', val: data.fearGreed },
+                                            { id: 'm2Money', label: '유동성 공급(M2)', val: data.m2Money + '%' },
+                                            { id: 'unemployment', label: '미국 실업률 (샴)', val: data.unemployment + '%' },
+                                        ].map((item) => (
+                                            <div key={item.id} onClick={() => handleOpenDetail(item.id)} className="flex justify-between items-center cursor-pointer group active:opacity-60 transition-all border-b border-slate-50 pb-3 h-12">
+                                                <p className="text-[13px] font-bold text-slate-600 group-hover:text-indigo-600 leading-none">{item.label}</p>
+                                                <div className="flex items-center gap-3">
+                                                    <p className={`text-[15px] font-black ${getIndicatorStatus(item.val, item.id).color} leading-none`}>{item.val}</p>
+                                                    <Icon name="ChevronRight" className="w-4 h-4 text-slate-200" />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === 'asset' && (
+                                <div className="space-y-3 animate-in">
+                                    <div className="flex justify-between items-center px-1 h-6">
+                                        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none">Market Assets</p>
+                                        <span className="text-[9px] font-bold text-slate-400 uppercase leading-none">Live Pricing</span>
+                                    </div>
+                                    {ASSET_LIST.map((asset) => (
+                                        <div key={asset.id} onClick={() => handleOpenDetail(asset.id, true)} className="bg-white p-5 rounded-[1.5rem] flex justify-between items-center border border-slate-100 shadow-sm cursor-pointer hover:border-indigo-100 transition-all active:scale-[0.98]">
+                                            <div className="flex items-center gap-4">
+                                                <div className={`w-11 h-11 bg-slate-50 rounded-2xl flex items-center justify-center ${asset.sig.replace('bg', 'text')} shadow-sm group-hover:bg-indigo-50`}><Icon name={asset.icon} className="w-6 h-6" /></div>
+                                                <div><p className="text-[14px] font-black text-slate-800 leading-tight mb-0.5">{asset.name}</p>
+                                                    <p className="text-[11px] font-bold text-slate-400 leading-none">
+                                                        {['nvda', 'tsla', 'bitcoin', 'nasdaqIdx', 'sp500Idx', 'gold', 'silver', 'copper'].includes(asset.id) ? '$' : ''}{data[asset.id.replace('Idx','')]?.toLocaleString()}{['samsung', 'hyundai', 'skhynix', 'naver', 'kakao', 'sambio', 'kospiIdx'].includes(asset.id) ? '원' : ''}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                            <span className={`text-[11px] font-black px-3 py-1 rounded-lg text-white ${asset.sig} shadow-sm`}>{asset.action}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+
+                            {activeTab === 're' && (
+                                <div className="space-y-4 animate-in pb-10">
+                                    <div className="bg-rose-50 border border-rose-100 p-7 rounded-[2.5rem] relative overflow-hidden mb-4 shadow-sm animate-fade">
+                                        <div className="absolute right-[-10px] top-[-10px] opacity-10"><Icon name="ThermometerSnowflake" className="w-24 h-24 text-rose-600" /></div>
+                                        <h3 className="text-rose-950 font-black text-xl leading-tight mb-2 italic tracking-tight">"부동산 시장 빙하기 탈출 시도 중.<br/>급매 소진 여부를 확인하세요."</h3>
+                                        <p className="text-[11px] font-bold text-rose-700 opacity-80 uppercase tracking-widest leading-none">사세요: 바닥 지지 확인 | 파세요: 거래 급감 시</p>
+                                    </div>
+                                    <div className="bg-white rounded-[2.5rem] p-7 border border-slate-100 shadow-sm space-y-6 mb-6">
+                                        <h3 className="text-xs font-black text-slate-400 uppercase flex items-center gap-2 mb-2 leading-none"><Icon name="Home" className="w-4 h-4 text-indigo-600" /> 부동산 데이터 레이더 (Full)</h3>
+                                        {[
+                                            { id: 'volume', label: '서울 거래량', val: data.volume.toLocaleString() + '건' },
+                                            { id: 'jeonse', label: '서울 전세가율', val: data.jeonse + '%' },
+                                            { id: 'cofixNew', label: '코픽스 (신규)', val: data.cofixNew + '%' },
+                                            { id: 'cofixBal', label: '코픽스 (잔액)', val: data.cofixBal + '%' },
+                                            { id: 'unsold', label: '서울 미분양', val: data.unsold.toLocaleString() + '호' },
+                                            { id: 'pir', label: '서울 PIR (소득대비)', val: data.pir },
+                                            { id: 'avgPrice', label: '아파트 평균가', val: data.avgPrice + '억' },
+                                        ].map((item) => (
+                                            <div key={item.id} onClick={() => handleOpenDetail(item.id)} className="flex justify-between items-center cursor-pointer group active:opacity-60 transition-all border-b border-slate-50 pb-3 h-12">
+                                                <p className="text-[13px] font-bold text-slate-600 group-hover:text-indigo-600 leading-none">{item.label}</p>
+                                                <div className="flex items-center gap-3">
+                                                    <p className={`text-[15px] font-black text-slate-800 leading-none`}>{item.val}</p>
+                                                    <Icon name="ChevronRight" className="w-4 h-4 text-slate-200" />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="space-y-3">
+                                        <p className="text-[10px] font-black text-slate-400 uppercase px-1 tracking-widest leading-none mt-4">실시간 추천 단지</p>
+                                        {RECOMMENDED_APTS.map((apt, i) => (
+                                            <div key={i} className="bg-white p-5 rounded-[1.5rem] flex justify-between items-center border border-slate-100 shadow-sm">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="w-11 h-11 bg-slate-50 rounded-2xl flex items-center justify-center text-indigo-600 shadow-sm"><Icon name="Home" className="w-6 h-6" /></div>
+                                                    <div><p className="text-[14px] font-black text-slate-800 leading-tight mb-0.5 leading-none">{apt.name} <span className="text-[10px] text-slate-400 ml-1 leading-none">{apt.area}</span></p><p className="text-[11px] font-bold text-slate-400 leading-none">{apt.location}</p></div>
+                                                </div>
+                                                <div className="text-right leading-none"><p className="text-[15px] font-black text-indigo-600 leading-none mb-1">{apt.price}</p><div className="flex items-center justify-end gap-0.5 text-[9px] font-bold text-rose-500 leading-none"><Icon name="TrendingUp" className="w-2 h-2" /> 신고가 근접</div></div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === 'talk' && (
+                                <div className="flex flex-col h-[650px] bg-white rounded-[2.5rem] shadow-xl border border-slate-100 overflow-hidden animate-fade mb-10">
+                                    <div className="bg-indigo-600 p-5 flex items-center justify-between shrink-0 shadow-lg">
+                                        <div className="flex items-center gap-3 text-white">
+                                            <div className="bg-white/20 p-2.5 rounded-xl"><Icon name="MessageCircle" className="w-5 h-5" /></div>
+                                            <div><h3 className="font-black text-sm leading-none">라이브 투자 토크</h3><p className="text-[10px] opacity-70 mt-1 font-medium italic">실시간 투자 정보 공유</p></div>
+                                        </div>
+                                    </div>
+                                    <div className="px-5 pt-3 bg-slate-50 shrink-0"><AdSenseBanner label="Premium Talk Feed" slim={true} /></div>
+                                    <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-slate-50/50 scrollbar-hide">
+                                        {messages.map((msg, i) => (
+                                            <div key={i} className={`flex flex-col ${msg.user === '나(익명)' ? 'items-end' : 'items-start'} animate-slide-up`}>
+                                                <div className="flex items-center gap-1.5 mb-1 px-1"><Icon name="User" className="w-3 h-3 text-slate-300" /><span className="text-[10px] font-black text-slate-400">{msg.user}</span></div>
+                                                <div className={`max-w-[85%] p-4 rounded-3xl text-[13px] font-medium leading-relaxed shadow-sm ${msg.user === '나(익명)' ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-white text-slate-800 rounded-tl-none border border-slate-100'}`}>{msg.text}</div>
+                                                <span className="text-[9px] text-slate-300 mt-1 font-bold">{msg.time}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="p-5 border-t border-slate-100 bg-white shrink-0">
+                                        <div className="relative flex items-center">
+                                            <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()} placeholder="의견을 나누세요..." className="w-full bg-slate-100 border-none rounded-2xl py-4 px-5 pr-14 text-sm font-medium focus:ring-2 focus:ring-indigo-500 transition-all shadow-inner h-12" />
+                                            <button onClick={handleSendMessage} className="absolute right-2 p-2.5 bg-indigo-600 text-white rounded-xl shadow-lg active:scale-90 transition-all"><Icon name="Send" className="w-4 h-4" /></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                        <AdSenseBanner label="Premium Bottom Advisor" />
+                    </main>
+
+                    <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[92%] max-w-sm bg-slate-900/95 backdrop-blur-2xl border border-white/10 h-20 rounded-[2.5rem] shadow-[0_25px_50px_-12px_rgba(0,0,0,0.5)] flex justify-around items-center px-8 z-[60]">
+                        <button onClick={() => setActiveTab('overview')} className={`flex flex-col items-center py-2 transition-all ${activeTab === 'overview' ? 'text-white scale-110' : 'text-slate-500 opacity-60'}`}><Icon name="BarChart3" className="w-6 h-6" /><span className="text-[10px] font-black uppercase mt-2 tracking-widest leading-none">Macro</span></button>
+                        <button onClick={() => setActiveTab('asset')} className={`flex flex-col items-center py-2 transition-all ${activeTab === 'asset' ? 'text-white scale-110' : 'text-slate-500 opacity-60'}`}><Icon name="Target" className="w-6 h-6" /><span className="text-[10px] font-black uppercase mt-2 tracking-widest leading-none">Asset</span></button>
+                        <button onClick={() => setActiveTab('re')} className={`flex flex-col items-center py-2 transition-all ${activeTab === 're' ? 'text-white scale-110' : 'text-slate-500 opacity-60'}`}><Icon name="Home" className="w-6 h-6" /><span className="text-[10px] font-black uppercase mt-2 tracking-widest leading-none">Estate</span></button>
+                        <button onClick={() => setActiveTab('talk')} className={`flex flex-col items-center py-2 transition-all ${activeTab === 'talk' ? 'text-white scale-110' : 'text-slate-500 opacity-60'}`}><Icon name="MessageCircle" className="w-6 h-6" /><span className="text-[10px] font-black uppercase mt-2 tracking-widest leading-none">Talk</span></button>
+                    </nav>
+
+                    {/* Modals: Correct conditional rendering to prevent blocking overlay */}
+                    {selectedDetail && <DetailModal item={selectedDetail} onClose={() => setSelectedDetail(null)} />}
+                    {isRiskModalOpen && <DetailModal isRiskModal={true} data={data} onClose={() => setIsRiskModalOpen(false)} />}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
